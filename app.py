@@ -12,9 +12,9 @@ from fastapi import Body
 
 app = FastAPI(title="COA + SOA + IR + FR Fast Engine")
 
-# -----------------------------
+
 # CORS (ALLOW ALL)
-# -----------------------------
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
