@@ -1,6 +1,9 @@
 # fr_logic.py
 from typing import Dict, Any
 
+
+# 1. WEIGHTS & SCORING RULES 
+
 WEIGHTS = {
     "Net Profit Margin": 0.15,
     "Sales Growth or Turnover Growth": 0.15,
@@ -40,37 +43,31 @@ RULES = {
 }
 
 
+# 2. CORE FR ENGINE 
+
+
 class APARFinancialModel:
-    def __init__(self, data_dict: Dict[str, Dict[str, float]]):
-        self.data = data_dict
+    def __init__(self, data: Dict[str, Dict[str, float]]):
+        self.data = data
 
-    def _calculate_single_year(
-        self, year: str, prev_year_revenue: float = None
-    ) -> Dict[str, float]:
+    def calculate_single_year(self, year: str, prev_sales: float = None) -> Dict[str, float]:
+        fin = self.data[year]
 
-        fin = self.data.get(year, {})
-        if not fin:
-            return {}
+        npm = fin["Net Profit"] / fin["Net Sales"]
+        growth = ((fin["Net Sales"] - prev_sales) / prev_sales) if prev_sales else 0.0
 
-        npm = fin.get("Net Profit", 0.0) / fin.get("Net Sales", 1)
-        growth = (
-            (fin["Net Sales"] - prev_year_revenue) / prev_year_revenue
-            if prev_year_revenue else 0.0
-        )
-        cf_ebitda = fin.get("Operating Cash flows", 0.0) / fin.get("EBITDA", 1)
-        dscr = fin.get("EBITDA", 0.0) / fin.get("Debt Service", 1)
-        icr = fin.get("EBIT", 0.0) / fin.get("Interest Payments", 1)
-        curr_ratio = fin.get("Current Assets", 0.0) / fin.get("Current Liabilities", 1)
+        cf_ebitda = fin["Operating Cash flows"] / fin["EBITDA"]
+        dscr = fin["EBITDA"] / fin["Debt Service"]
+        icr = fin["EBIT"] / fin["Interest Payments"]
+        current_ratio = fin["Current Assets"] / fin["Current Liabilities"]
 
-        ccc = 0.0
-        if fin.get("COGS") and fin.get("Net Sales"):
-            inv = fin.get("Inventory", 0.0) / fin["COGS"] * 365
-            rec = fin.get("Trade and other receivables", 0.0) / fin["Net Sales"] * 365
-            pay = fin.get("Trade Creditors", 0.0) / fin["COGS"] * 365
-            ccc = inv + rec - pay
+        inv_days = (fin["Inventory"] / fin["COGS"]) * 365
+        rec_days = (fin["Trade and other receivables"] / fin["Net Sales"]) * 365
+        pay_days = (fin["Trade Creditors"] / fin["COGS"]) * 365
+        ccc = inv_days + rec_days - pay_days
 
-        tnw = fin.get("Shareholders Equity", 0.0) - fin.get("Intangible assets", 0.0)
-        leverage = fin.get("Total Liabilities", 0.0) / tnw if tnw else 0.0
+        tnw = fin["Shareholders Equity"] - fin["Intangible assets"]
+        leverage = fin["Total Liabilities"] / tnw
 
         return {
             "Net Profit Margin": npm,
@@ -78,33 +75,39 @@ class APARFinancialModel:
             "Net CF from Operations/EBITDA": cf_ebitda,
             "DSCR": dscr,
             "Interest coverage ratio (ICR)": icr,
-            "Current Ratio": curr_ratio,
+            "Current Ratio": current_ratio,
             "Cash Conversion Cycle": ccc,
             "Leverage (Debt / Tangible Net Worth)": leverage
         }
 
-    def get_weighted_ratios(self, eval_year: str, prev_year: str, hist_rev: float):
-        prev = self._calculate_single_year(prev_year, hist_rev)
-        curr = self._calculate_single_year(eval_year, self.data[prev_year]["Net Sales"])
+    def weighted_ratios(self, curr_year: str, prev_year: str, hist_sales: float) -> Dict[str, float]:
+        prev = self.calculate_single_year(prev_year, hist_sales)
+        curr = self.calculate_single_year(curr_year, self.data[prev_year]["Net Sales"])
 
         final = {}
         for k in curr:
-            final[k] = curr[k] if k == "Leverage (Debt / Tangible Net Worth)" \
-                else curr[k] * 0.70 + prev.get(k, 0.0) * 0.30
+            if k == "Leverage (Debt / Tangible Net Worth)":
+                final[k] = curr[k]
+            else:
+                final[k] = 0.70 * curr[k] + 0.30 * prev[k]
         return final
 
 
-def get_score(metric: str, value: float) -> int:
+# 3. SCORING FUNCTION
 
+
+def get_score(metric: str, value: float) -> int:
     if metric == "Cash Conversion Cycle":
-        return 600 if value <= 30.01 else 300 if value <= 60.01 else 0
+        if value <= 30.01: return 600
+        elif value <= 60.01: return 300
+        return 0
 
     if metric == "Leverage (Debt / Tangible Net Worth)":
         if value <= 1.00: return 500
-        if value <= 1.70: return 400
-        if value <= 2.50: return 300
-        if value <= 3.00: return 200
-        if value <= 3.50: return 100
+        elif value <= 1.70: return 400
+        elif value <= 2.50: return 300
+        elif value <= 3.00: return 200
+        elif value <= 3.50: return 100
         return 0
 
     for threshold, score in RULES.get(metric, []):
@@ -113,29 +116,39 @@ def get_score(metric: str, value: float) -> int:
     return 0
 
 
-def calculate_fr_score(inputs: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
+# 4. FASTAPI ENTRY POINT
 
+
+def calculate_fr_score(inputs: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
     years = sorted(inputs.keys())
-    eval_year, prev_year, hist_year = (
-        (years[-1], years[-2], years[-3]) if len(years) >= 3
-        else (years[-1], years[-2], years[-2])
-    )
+    if len(years) < 3:
+        raise ValueError("At least 3 years of data required")
+
+    hist_year, prev_year, curr_year = years[-3], years[-2], years[-1]
 
     model = APARFinancialModel(inputs)
-    ratios = model.get_weighted_ratios(
-        eval_year, prev_year, inputs[hist_year]["Net Sales"]
-    )
 
-    financial_ratios = {}
+    prev_ratios = model.calculate_single_year(prev_year, inputs[hist_year]["Net Sales"])
+    curr_ratios = model.calculate_single_year(curr_year, inputs[prev_year]["Net Sales"])
+    weighted = model.weighted_ratios(curr_year, prev_year, inputs[hist_year]["Net Sales"])
+
+    intermediate = {
+        k: {
+            "previous_year": round(prev_ratios[k], 4),
+            "current_year": round(curr_ratios[k], 4)
+        }
+        for k in prev_ratios
+    }
+
     total_score = 0.0
+    breakdown = {}
 
     for metric, weight in WEIGHTS.items():
-        value = round(ratios.get(metric, 0.0), 3)
+        value = round(weighted[metric], 3)
         score = get_score(metric, value)
-
         total_score += score * weight
 
-        financial_ratios[metric] = {
+        breakdown[metric] = {
             "value": value,
             "score": score,
             "weight_percent": int(weight * 100)
@@ -143,5 +156,6 @@ def calculate_fr_score(inputs: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
 
     return {
         "total_score": round(total_score, 3),
-        "financial_ratios": financial_ratios
+        "financial_ratios": breakdown,
+        "intermediate_financial_ratios": intermediate
     }
